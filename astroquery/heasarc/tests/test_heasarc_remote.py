@@ -3,6 +3,9 @@
 import pytest
 import requests
 
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+
 from ...heasarc import Heasarc
 
 from .conftest import MockResponse, parametrization_local_save_remote, skycoord_3C_273
@@ -63,13 +66,15 @@ class TestHeasarc:
         mission = 'rosmaster'
         cols = heasarc.query_mission_cols(mission=mission)
 
-        assert len(cols) == 29
+        assert len(cols) >= 29
+
+        print(cols)
 
         # Test that the cols list contains known names
-        assert 'EXPOSURE' in cols
-        assert 'RA' in cols
-        assert 'DEC' in cols
-        assert 'SEARCH_OFFSET_' in cols
+        assert 'exposure' in cols
+        assert 'ra' in cols
+        assert 'dec' in cols
+        assert 'Search_Offset' in cols
 
     def test_query_object_async(self):
         mission = 'rosmaster'
@@ -96,3 +101,20 @@ class TestHeasarc:
             skycoord_3C_273, mission=mission, radius="1 degree")
 
         assert len(table) == 63
+
+    def test_strange_units(self):
+        coords = SkyCoord('150.01d 2.2d', frame='icrs')  #COSMOS center acording to Simbad
+        #first get an X-ray catalog from Heasarc
+        heasarc = Heasarc()
+        table = heasarc.query_mission_list()
+        mask = (table['Mission'] =="CHANDRA")
+        chandratable = table[mask]  
+
+
+        #want ccosmoscat
+        mission = 'ccosmoscat'
+        ccosmoscat_rad = 1 #radius of chandra cosmos catalog
+        ccosmoscat = heasarc.query_region(coords, mission=mission, radius='1 degree', resultmax = 5000, fields = "ALL")
+
+        #need to make the chandra catalog into a fits table 
+        ccosmoscat.write('COSMOS_chandra.fits', overwrite = "True")
