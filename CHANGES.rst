@@ -14,6 +14,11 @@ eso
 - Restore support for .Z files. [#1818]
 - Update tests and documentation.
 
+esa.neocc
+^^^^^^^^^
+
+- New module to provide access too the ESA near-earth objects coordination centre. [#2254]
+
 ipac.irsa
 ^^^^^^^^^
 
