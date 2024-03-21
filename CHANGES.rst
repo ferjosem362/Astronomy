@@ -30,6 +30,11 @@ esa.hsa
 
 - New module to access the ESA Herschel mission. [#2122]
 
+esa.neocc
+^^^^^^^^^
+
+- New module to provide access too the ESA near-earth objects coordination centre. [#2254]
+
 ipac.irsa
 ^^^^^^^^^
 
