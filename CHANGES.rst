@@ -7,6 +7,10 @@ New Tools and Services
 
 Service fixes and enhancements
 ------------------------------
+heasarc
+^^^^^^^
+
+- Refactor heasarc to use the VO backend. The old Heasarc class is now HeasarcBrowser [#2997]
 
 astrometry_net
 ^^^^^^^^^^^^^^
@@ -40,6 +44,7 @@ esa.jwst
 - get_obs_products method supports product_type parameter as string or list [#2995]
 
 - Add download_files_from_program method to get all products by program id [#3073]
+
 
 mpc
 ^^^
