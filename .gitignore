@@ -1,6 +1,23 @@
+# Python
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.venv/
+.env
+
+# Large/raw astronomy data
 data_raw/
-results/
-logs/
+*.fits
+*.fits.gz
+*.fz
+
+# Heavy intermediate products
+results/serval_*/
+external/serval/
+
+# Logs/temp
+*.log
+*.tmp
+.DS_Store
+
+# Keep selected lightweight outputs if force-added

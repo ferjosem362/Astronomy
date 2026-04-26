@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from astropy.timeseries import LombScargle
+
+try:
+    from scipy.signal import find_peaks
+    HAVE_SCIPY = True
+except Exception:
+    HAVE_SCIPY = False
+
+
+# -----------------------------
+# helpers
+# -----------------------------
+def pick_col(df, candidates, required=True):
+    cols_lower = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            return cols_lower[cand.lower()]
+
+    # relaxed matching
+    for c in df.columns:
+        cl = c.lower()
+        for cand in candidates:
+            if cand.lower() in cl:
+                return c
+
+    if required:
+        raise ValueError(f"No encuentro ninguna columna entre: {candidates}. "
+                         f"Columnas disponibles: {list(df.columns)}")
+    return None
+
+
+def load_table(path):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    # intenta csv/tsv/whitespace automáticamente
+    df = pd.read_csv(path, sep=None, engine="python", comment="#")
+    return df
+
+
+def build_veto_periods(prot_list, extra_marks):
+    veto = []
+    labels = []
+
+    for prot in prot_list:
+        veto.append(prot);      labels.append(f"P_rot={prot:.2f} d")
+        veto.append(prot / 2);  labels.append(f"P_rot/2={prot/2:.2f} d")
+        veto.append(prot / 3);  labels.append(f"P_rot/3={prot/3:.2f} d")
+        veto.append(prot / 4);  labels.append(f"P_rot/4={prot/4:.2f} d")
+
+    for p in extra_marks:
+        veto.append(p)
+        labels.append(f"{p:.5g} d")
+
+    return np.array(veto), labels
+
+
+def in_veto(period, veto_centers, frac_width):
+    # veto relativo: p * frac_width
+    for vc in veto_centers:
+        if abs(period - vc) <= frac_width * vc:
+            return True
+    return False
+
+
+def unique_peak_periods(periods, power, npeaks=12, min_sep_frac=0.03):
+    """
+    Devuelve picos principales evitando duplicados muy cercanos en periodo.
+    """
+    if HAVE_SCIPY:
+        peak_idx, _ = find_peaks(power)
+        if len(peak_idx) == 0:
+            peak_idx = np.arange(len(power))
+    else:
+        peak_idx = np.arange(1, len(power) - 1)
+        peak_idx = peak_idx[(power[1:-1] > power[:-2]) & (power[1:-1] > power[2:])] + 1
+        if len(peak_idx) == 0:
+            peak_idx = np.arange(len(power))
+
+    order = peak_idx[np.argsort(power[peak_idx])[::-1]]
+
+    chosen = []
+    chosen_idx = []
+    for idx in order:
+        p = periods[idx]
+        if all(abs(p - pc) > min_sep_frac * pc for pc in chosen):
+            chosen.append(p)
+            chosen_idx.append(idx)
+        if len(chosen) >= npeaks:
+            break
+
+    return np.array(chosen_idx, dtype=int)
+
+
+# -----------------------------
+# main
+# -----------------------------
+def main():
+    ap = argparse.ArgumentParser(description="GLS/LS periodogram + harmonic veto bands")
+    ap.add_argument("input", help="Ruta a tabla RV (csv/tsv/txt)")
+    ap.add_argument("--outdir", default="results/periodograms", help="Directorio de salida")
+    ap.add_argument("--time-col", default=None, help="Nombre columna tiempo")
+    ap.add_argument("--rv-col", default=None, help="Nombre columna RV")
+    ap.add_argument("--err-col", default=None, help="Nombre columna error RV")
+    ap.add_argument("--inst-col", default=None, help="Nombre columna instrumento")
+    ap.add_argument("--pmin", type=float, default=0.5, help="Periodo mínimo [d]")
+    ap.add_argument("--pmax", type=float, default=100.0, help="Periodo máximo [d]")
+    ap.add_argument("--samples-per-peak", type=int, default=15)
+    ap.add_argument("--veto-frac", type=float, default=0.03,
+                    help="Semiancho relativo de veto (ej. 0.03 = 3%%)")
+    ap.add_argument("--prot", nargs="*", type=float, default=[36.2, 38.7],
+                    help="Periodos de rotación candidatos")
+    ap.add_argument("--mark", nargs="*", type=float, default=[11.867564152695252, 3.24, 1.62],
+                    help="Periodos extra a marcar")
+    args = ap.parse_args()
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    df = load_table(args.input)
+
+    time_candidates = ["bjd", "bjd_tdb", "jd", "mjd", "mjd_obs", "time", "times", "t"]
+    rv_candidates   = ["rv", "rvs", "vrad", "vel", "velocity"]
+    err_candidates  = ["rverr", "rverr", "e_rv", "erv", "sigma_rv", "rv_error", "err"]
+    inst_candidates = ["inst", "instrument", "instr", "source", "dataset"]
+
+    tcol = args.time_col or pick_col(df, time_candidates, required=True)
+    rvcol = args.rv_col or pick_col(df, rv_candidates, required=True)
+    ecol = args.err_col or pick_col(df, err_candidates, required=False)
+    icol = args.inst_col or pick_col(df, inst_candidates, required=False)
+
+    work = df.copy()
+
+    # limpia NaNs
+    needed = [tcol, rvcol]
+    if ecol is not None:
+        needed.append(ecol)
+    if icol is not None:
+        needed.append(icol)
+    work = work.dropna(subset=needed).copy()
+
+    t = np.asarray(work[tcol], dtype=float)
+    y = np.asarray(work[rvcol], dtype=float)
+
+    if ecol is not None:
+        dy = np.asarray(work[ecol], dtype=float)
+        dy = np.where(dy <= 0, np.nanmedian(dy[dy > 0]), dy)
+    else:
+        dy = None
+
+    # quita offset por instrumento (muy importante)
+    if icol is not None:
+        work["_rv_detr"] = work[rvcol] - work.groupby(icol)[rvcol].transform("median")
+        y = np.asarray(work["_rv_detr"], dtype=float)
+    else:
+        y = y - np.median(y)
+
+    # GLS/LS
+    fmin = 1.0 / args.pmax
+    fmax = 1.0 / args.pmin
+
+    ls = LombScargle(t, y, dy, fit_mean=True, center_data=True)
+    freq, power = ls.autopower(
+        minimum_frequency=fmin,
+        maximum_frequency=fmax,
+        samples_per_peak=args.samples_per_peak,
+    )
+    periods = 1.0 / freq
+
+    # Window function
+    yw = np.ones_like(t)
+    lsw = LombScargle(t, yw, fit_mean=False, center_data=True)
+    freq_w, power_w = lsw.autopower(
+        minimum_frequency=fmin,
+        maximum_frequency=fmax,
+        samples_per_peak=args.samples_per_peak,
+    )
+    periods_w = 1.0 / freq_w
+
+    # FAP levels
+    try:
+        fap_levels = [0.1, 0.01, 0.001]
+        fap_powers = [ls.false_alarm_level(f) for f in fap_levels]
+    except Exception:
+        fap_levels = []
+        fap_powers = []
+
+    # veto periods
+    veto_centers, veto_labels = build_veto_periods(args.prot, args.mark)
+
+    # picos
+    peak_idx = unique_peak_periods(periods, power, npeaks=12, min_sep_frac=0.03)
+
+    peak_table = []
+    for idx in peak_idx:
+        p = periods[idx]
+        pw = power[idx]
+        veto_flag = in_veto(p, veto_centers, args.veto_frac)
+        peak_table.append((p, pw, veto_flag))
+
+    peak_table = sorted(peak_table, key=lambda x: x[1], reverse=True)
+
+    # --------------------------------
+    # FIGURA 1: periodograma
+    # --------------------------------
+    plt.figure(figsize=(12, 7))
+    plt.plot(periods, power, lw=1.5)
+    plt.xlim(args.pmin, args.pmax)
+    plt.xlabel("Periodo [d]")
+    plt.ylabel("Potencia GLS")
+    plt.title("Alpha Cen B — periodograma GLS con bandas vetadas")
+
+    # sombras de veto
+    used_text = set()
+    ymax = np.nanmax(power)
+
+    for vc, lab in zip(veto_centers, veto_labels):
+        lo = vc * (1.0 - args.veto_frac)
+        hi = vc * (1.0 + args.veto_frac)
+        if hi < args.pmin or lo > args.pmax:
+            continue
+
+        plt.axvspan(lo, hi, alpha=0.15)
+        plt.axvline(vc, lw=0.8)
+
+        tag = round(vc, 4)
+        if tag not in used_text:
+            used_text.add(tag)
+            plt.text(vc, 0.96 * ymax, lab, rotation=90, va="top", ha="center", fontsize=8)
+
+    # M10 destacado
+    if 11.867564152695252 >= args.pmin and 11.867564152695252 <= args.pmax:
+        plt.axvline(11.867564152695252, lw=2.0)
+        plt.text(11.867564152695252, 0.82 * ymax, "M10 = 11.8676 d",
+                 rotation=90, va="top", ha="left", fontsize=9)
+
+    # FAP
+    for lev, fp in zip(fap_levels, fap_powers):
+        plt.axhline(fp, ls="--", lw=1.0)
+        plt.text(args.pmax * 0.98, fp, f"FAP={lev:g}", va="bottom", ha="right", fontsize=8)
+
+    # marca picos principales
+    for p, pw, veto_flag in peak_table[:10]:
+        label = f"{p:.2f} d"
+        if veto_flag:
+            label += " [VETO]"
+        plt.plot([p], [pw], marker="o")
+        plt.text(p, pw, label, fontsize=8, va="bottom", ha="left")
+
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    f1 = outdir / "gls_periodogram_veto.png"
+    plt.savefig(f1, dpi=180)
+    plt.close()
+
+    # --------------------------------
+    # FIGURA 2: window function
+    # --------------------------------
+    plt.figure(figsize=(12, 5))
+    plt.plot(periods_w, power_w, lw=1.3)
+    plt.xlim(args.pmin, args.pmax)
+    plt.xlabel("Periodo [d]")
+    plt.ylabel("Power (window)")
+    plt.title("Alpha Cen B — window function")
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    f2 = outdir / "window_function.png"
+    plt.savefig(f2, dpi=180)
+    plt.close()
+
+    # --------------------------------
+    # salida textual
+    # --------------------------------
+    print("\n=== Columnas usadas ===")
+    print("time :", tcol)
+    print("rv   :", rvcol)
+    print("err  :", ecol)
+    print("inst :", icol)
+
+    print("\n=== Top peaks ===")
+    for i, (p, pw, veto_flag) in enumerate(peak_table[:12], start=1):
+        print(f"{i:2d}. P={p:10.5f} d   power={pw:10.6f}   veto={veto_flag}")
+
+    print("\n=== Distancias de M10 a armónicos vetados ===")
+    m10 = 11.867564152695252
+    rows = []
+    for vc, lab in zip(veto_centers, veto_labels):
+        dist = abs(m10 - vc)
+        frac = dist / vc
+        rows.append((lab, vc, dist, frac))
+    rows = sorted(rows, key=lambda x: x[2])
+
+    for lab, vc, dist, frac in rows[:10]:
+        print(f"{lab:18s}  center={vc:10.5f}  |ΔP|={dist:8.5f} d   frac={100*frac:6.3f}%")
+
+    print("\n=== Outputs ===")
+    print(f1)
+    print(f2)
+
+
+if __name__ == "__main__":
+    main()
